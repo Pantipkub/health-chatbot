@@ -1,5 +1,5 @@
 from dotenv import load_dotenv  
-from langchain_core.messages import BaseMessage # The foundational class for all message types in LangGraph
+from langchain_core.messages import BaseMessage, AIMessage # The foundational class for all message types in LangGraph
 from langchain_core.messages import ToolMessage # Passes data back to LLM after it calls a tool such as the content and the tool_call_id
 from langchain_core.messages import SystemMessage # Message for providing instructions to the LLM
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -8,6 +8,7 @@ from langgraph.graph.message import add_messages
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from .state import AgentState
+
 
 load_dotenv()
 
@@ -63,7 +64,7 @@ def classify_intent_node(state: AgentState):
     """
 
     state["current_node"] = "classify_intent"
-    state["steps"].append("Classifying user intent with LLM")
+    state["steps"].append("Analyzing symptoms and intent")
 
     prompt = SystemMessage(content=
         "You are a medical triage assistant.\n"
@@ -106,6 +107,9 @@ def call_model(state: AgentState):
     Generate final response based on routed intent and system prompt.
     """
 
+    state["current_node"] = "our_agent"
+    state["steps"].append("Generating final response")
+
     system_prompt = SystemMessage(content=
         "You are a medical information assistant for students and staff.\n\n"
 
@@ -128,8 +132,27 @@ def call_model(state: AgentState):
         "- Calm, respectful, non-alarming\n"
         "- Avoid long lists unless the user asks for details"
     )
-    response = chat_model.invoke([system_prompt] + state["messages"])
-    return {"messages": [response]}
+
+    try:
+        response = chat_model.invoke([system_prompt] + state["messages"])
+
+        # ---- DEBUG: LLM response ----
+        print("! LLM responded")
+        print("CONTENT:", response.content[:100])
+
+        return {"messages": [response]}
+
+    except Exception as e:
+        print("! LLM ERROR:", repr(e))
+
+        state["steps"].append("LLM failed (possible token or quota issue)")
+        return {
+            "messages": [
+                AIMessage(
+                    content="ขออภัย ระบบมีปัญหาในการตอบคำถามชั่วคราว กรุณาลองใหม่อีกครั้ง"
+                )
+            ]
+        }
 
 
 # ----- Generate graph -----
