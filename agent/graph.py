@@ -8,6 +8,7 @@ from langgraph.graph.message import add_messages
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from .state import AgentState
+from .rag_utils import retrieve_context
 
 load_dotenv()
 
@@ -103,33 +104,42 @@ def should_continue(state: AgentState):
 
 def call_model(state: AgentState):
     """
-    Generate final response based on routed intent and system prompt.
+    Node นี้ทำหน้าที่ RAG: ค้นหาข้อมูล -> สร้าง Prompt -> ให้ Gemini ตอบ
     """
+    messages = state["messages"]
+    last_user_message = messages[-1].content # เอาคำถามล่าสุดมา
+    
+    # 1. ไปค้นข้อมูลใน DB (Retrieval)
+    print(f"--- Debug: กำลังค้นข้อมูลเรื่อง '{last_user_message}' ---")
+    context = retrieve_context(last_user_message)
+    
+    # 2. สร้าง Prompt ที่มี Context (Augmented Generation)
+    if context:
+        rag_prompt = (
+            "คุณคือ AI ผู้ช่วยด้านสุขภาพอัจฉริยะ (Health Assistant) "
+            "หน้าที่ของคุณคือให้ข้อมูลสุขภาพโดยอ้างอิงจาก 'ข้อมูลที่ค้นพบ' ด้านล่างนี้เท่านั้น\n\n"
+            f"--- ข้อมูลที่ค้นพบ (Context) ---\n{context}\n"
+            "------------------------------\n\n"
+            "ข้อปฏิบัติ:\n"
+            "1. ตอบคำถามโดยใช้ข้อมูลจาก Context เป็นหลัก\n"
+            "2. ถ้าข้อมูลใน Context มีตัวเลขหรือเกณฑ์ (เช่น ค่าเบาหวาน, ค่าไต) ให้ระบุตัวเลขนั้นให้ชัดเจน\n"
+            "3. ถ้าใน Context ไม่มีข้อมูลที่ผู้ใช้ถาม ให้ตอบว่า 'ขออภัย ข้อมูลในคลังความรู้ปัจจุบันยังมีไม่เพียงพอสำหรับเรื่องนี้'\n"
+            "4. ห้ามวินิจฉัยโรคฟันธง (เช่น 'คุณเป็นโรคไตแน่ๆ') แต่ให้ใช้คำว่า 'มีความเสี่ยง' หรือ 'ตามเกณฑ์ระบุว่า...'\n"
+            "5. ใช้ภาษาที่เป็นกันเอง สุภาพ และเข้าใจง่าย\n"
+        )
+    else:
+        # กรณีค้นไม่เจออะไรเลย
+        rag_prompt = (
+            "คุณคือผู้ช่วยด้านสุขภาพ แต่ตอนนี้คุณไม่พบข้อมูลอ้างอิงในฐานข้อมูล "
+            "ให้ตอบผู้ใช้ว่าคุณสามารถให้คำแนะนำได้เฉพาะเรื่อง เบาหวาน และ โรคไต ตาม Guideline ของไทยเท่านั้น "
+            "และแนะนำให้ผู้ใช้ปรึกษาแพทย์หากมีอาการรุนแรง"
+        )
 
-    system_prompt = SystemMessage(content=
-        "You are a medical information assistant for students and staff.\n\n"
-
-        "Primary goal:\n"
-        "- Help the user understand their concern at a high level\n"
-        "- Respond concisely and adaptively\n\n"
-
-        "Rules:\n"
-        "- Do NOT assume age, gender, or medical history\n"
-        "- Do NOT provide diagnoses or treatments\n"
-        "- If key context is missing, ASK before explaining in depth\n\n"
-
-        "Response strategy:\n"
-        "1. Acknowledge the concern briefly\n"
-        "2. Give a short high-level explanation (2-3 sentences max)\n"
-        "3. Ask up to 2 clarifying questions ONLY if they affect relevance\n"
-        "4. If serious risk is possible, gently suggest seeing a doctor\n\n"
-
-        "Tone:\n"
-        "- Calm, respectful, non-alarming\n"
-        "- Avoid long lists unless the user asks for details"
-    )
-    response = chat_model.invoke([system_prompt] + state["messages"])
-    return {"messages": [response]}
+    # 3. ส่งให้ Gemini (System Prompt + History)
+    # เราจะแทรก System Prompt ใหม่เข้าไปในการเรียกครั้งนี้โดยเฉพาะ
+    response = chat_model.invoke([SystemMessage(content=rag_prompt)] + messages)
+    
+    return {"messages": [response], "steps": ["retrieval", "generate"]}
 
 
 # ----- Generate graph -----
