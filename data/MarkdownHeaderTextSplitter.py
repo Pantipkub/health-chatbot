@@ -8,7 +8,9 @@ from langchain_text_splitters import MarkdownHeaderTextSplitter
 PERSIST_DIRECTORY = "./chroma_db_health"
 FILES_TO_READ = [
     "diabetes_knowledge.md", 
-    "kidney_knowledge.md"
+    "kidney_knowledge.md",
+    "hypertension_knowledge.md", # เพิ่มอันนี้
+    "dyslipidemia_knowledge.md"
 ] 
 
 def main():
