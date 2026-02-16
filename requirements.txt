@@ -3,4 +3,7 @@ uvicorn
 langgraph
 langchain
 langchain-google-genai
+langchain-huggingface
+langchain-chroma
+sentence-transformers
 python-dotenv
