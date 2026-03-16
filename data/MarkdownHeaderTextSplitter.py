@@ -9,7 +9,7 @@ PERSIST_DIRECTORY = "./chroma_db_health"
 FILES_TO_READ = [
     "diabetes_knowledge.md", 
     "kidney_knowledge.md",
-    "hypertension_knowledge.md", # เพิ่มอันนี้
+    "hypertension_knowledge.md",
     "dyslipidemia_knowledge.md"
 ] 
 
