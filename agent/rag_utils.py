@@ -1,9 +1,10 @@
 # rag_utils.py
+import os
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 
-# Config ต้องตรงกับตอน create_db.py เป๊ะๆ!
-PERSIST_DIRECTORY = "./chroma_db_health"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PERSIST_DIRECTORY = os.path.join(BASE_DIR, "data", "chroma_db_health")
 
 # โหลด Embedding Model (บังคับ CPU เหมือนเดิมเพื่อแก้บั๊ก Mac)
 embedding_function = HuggingFaceEmbeddings(
