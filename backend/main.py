@@ -67,3 +67,17 @@ async def chat_completions(req: ChatRequest):
             }
         ]
     }
+
+@app.get("/v1/models")
+async def list_models():
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "health-model",  # ชื่อที่คุณต้องการให้โผล่ใน Open WebUI
+                "object": "model",
+                "created": 1667925528,
+                "owned_by": "health-chatbot"
+            }
+        ]
+    }
