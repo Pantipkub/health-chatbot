@@ -3,3 +3,10 @@ __pycache__/
 *.pyo
 *.pyd
 .env
+
+# Chroma DB / vector store
+chroma_db_health/
+*.bin
+*.sqlite3
+
+key.json
