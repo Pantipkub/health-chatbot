@@ -41,7 +41,7 @@ async def chat_completions(req: ChatRequest):
         elif msg.role == "system":
             langchain_messages.append(SystemMessage(content=msg.content))
 
-    # 2. โยนประวัติทั้งหมดเข้า LangGraph (ไม่ต้องมี config thread_id แล้ว)
+    # 2. โยนประวัติทั้งหมดเข้า LangGraph
     result = graph.invoke({
         "messages": langchain_messages,
         "steps": [],
@@ -51,6 +51,24 @@ async def chat_completions(req: ChatRequest):
 
     # 3. ดึงคำตอบสุดท้ายของ AI
     assistant_msg = result["messages"][-1]
+
+    # ==========================================
+    # 🌟 ส่วนที่เพิ่มเข้ามา: ดึงข้อมูล Token มาจัดเรียงใหม่
+    # ==========================================
+    usage_data = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0
+    }
+    
+    # ตรวจสอบว่ามี usage_metadata ส่งมาจาก Vertex AI หรือไม่
+    if hasattr(assistant_msg, "usage_metadata") and assistant_msg.usage_metadata:
+        meta = assistant_msg.usage_metadata
+        # แปลงชื่อคีย์ของ LangChain ให้กลายเป็นภาษาที่ OpenWebUI เข้าใจ
+        usage_data["prompt_tokens"] = meta.get("input_tokens", 0)
+        usage_data["completion_tokens"] = meta.get("output_tokens", 0)
+        usage_data["total_tokens"] = meta.get("total_tokens", 0)
+    # ==========================================
 
     # 4. ส่งกลับไปให้ Open WebUI โชว์บนหน้าจอ
     return {
@@ -65,7 +83,8 @@ async def chat_completions(req: ChatRequest):
                 },
                 "finish_reason": "stop"
             }
-        ]
+        ],
+        "usage": usage_data  # <--- แปะบิลค่า Token ส่งไปด้วยตรงนี้!
     }
 
 @app.get("/v1/models")
