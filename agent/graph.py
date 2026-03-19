@@ -1,4 +1,7 @@
-from dotenv import load_dotenv  
+from dotenv import load_dotenv 
+import os
+import json 
+import tempfile
 from langchain_core.messages import BaseMessage # The foundational class for all message types in LangGraph
 from langchain_core.messages import ToolMessage # Passes data back to LLM after it calls a tool such as the content and the tool_call_id
 from langchain_core.messages import SystemMessage # Message for providing instructions to the LLM
@@ -12,6 +15,31 @@ from .state import AgentState
 from .rag_utils import retrieve_context
 
 load_dotenv()
+
+gcp_secret = os.environ.get("GCP_CREDS_JSON")
+
+if gcp_secret:
+    try:
+        # 2. สร้างไฟล์ชั่วคราว (Temp File) ระบบจะลบทิ้งอัตโนมัติเมื่อแอปปิด
+        fd, temp_path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, 'w') as f:
+            f.write(gcp_secret)
+        
+        # 3. สั่งให้ Google SDK อ่านกุญแจจากไฟล์ชั่วคราวนี้
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
+        
+        # ดึง Project ID มาใช้
+        creds_dict = json.loads(gcp_secret)
+        os.environ["GOOGLE_CLOUD_PROJECT"] = creds_dict.get("project_id", "")
+        
+        print("✅ Secure Mode: โหลด Vertex AI Credentials สำเร็จ!")
+    except Exception as e:
+        print(f"❌ Error loading credentials: {e}")
+else:
+    # ถ้ารันในคอมตัวเอง (Local) แล้วไม่ได้ตั้ง GCP_CREDS_JSON ไว้
+    # ระบบจะข้ามไปใช้ GOOGLE_APPLICATION_CREDENTIALS ในไฟล์ .env ของคุณตามปกติครับ
+    print("⚠️ Local Mode: ใช้ Credentials จากไฟล์ .env")
+
 
 @tool
 def add(a: int, b:int):
