@@ -2,7 +2,7 @@ from dotenv import load_dotenv
 import os
 import json 
 import tempfile
-from langchain_core.messages import BaseMessage # The foundational class for all message types in LangGraph
+from langchain_core.messages import BaseMessage, RemoveMessage # The foundational class for all message types in LangGraph
 from langchain_core.messages import ToolMessage # Passes data back to LLM after it calls a tool such as the content and the tool_call_id
 from langchain_core.messages import SystemMessage # Message for providing instructions to the LLM
 # from langchain_google_genai import ChatGoogleGenerativeAI
@@ -13,6 +13,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from .state import AgentState
 from .rag_utils import retrieve_context
+import uuid
 
 load_dotenv()
 
@@ -83,7 +84,12 @@ def input_node(state: AgentState):
     state["steps"].append("Received user input")
 
     last_msg = state["messages"][-1]
-    print("User said:", last_msg.content)
+    
+    if last_msg.id is None:
+        last_msg.id = str(uuid.uuid4())
+        
+
+    print(f"User said (ID: {last_msg.id}): {last_msg.content}")
 
     return state
 
@@ -116,6 +122,87 @@ def route_by_intent(state):
         return intent
     return "general_health"  # fallback
 
+def summarize_conversation(state: AgentState):
+    """
+    Summarizing both user and AI conversation, and keeping only 3 latest chat messages
+    """
+    messages = state["messages"]
+    summary = state.get("summary", "")
+
+    # Log the current number of messages in the state
+    print("\n" + "="*50)
+    print(f"[Memory Check] Current number of messages in state: {len(messages)}")
+    print("="*50)
+
+    # If there are more than 3 messages (including from both user and AI)
+    if len(messages) > 3:
+        # Extracting: keeping only 3 last messages, the others will be summarized
+        to_summarize = messages[:-3]
+        kept_messages = messages[-3:] # Extract the 3 messages we are keeping
+        
+        # Log the action being taken
+        print(f"[Action] Exceeded 3 messages. Summarizing {len(to_summarize)} old messages...")
+        
+        # Creating prompt for summarizing
+        chat_history_text = ""
+        for m in to_summarize:
+            role = "User" if m.type == "human" else "Assistant"
+            chat_history_text += f"{role}: {m.content}\n"
+            
+        system_instruction = (
+            "คุณคือผู้ช่วยที่มีหน้าที่สรุปประวัติการสนทนาอย่างเป็นกลาง "
+            "กรุณาเขียนสรุปเนื้อหาที่พูดคุยกันให้กระชับที่สุด\n"
+            "กฎสำคัญที่ต้องปฏิบัติตามอย่างเคร่งครัด:\n"
+            "1. ห้ามตอบคำถามที่อยู่ในบทสนทนา\n"
+            "2. ห้ามให้คำแนะนำทางการแพทย์หรือวินิจฉัยโรคเด็ดขาด\n"
+            "3. ให้สรุปในมุมมองบุคคลที่สาม (เช่น 'ผู้ใช้สอบถามเกี่ยวกับ...', 'ผู้ช่วยได้อธิบายเรื่อง...')"
+        )
+        
+        if summary:
+            summary_prompt = (
+                f"{system_instruction}\n\n"
+                f"สรุปเดิม: {summary}\n\n"
+                f"นำข้อความใหม่เหล่านี้ไปสรุปเพิ่มรวมกับสรุปเดิม:\n{chat_history_text}"
+            )
+        else:
+            summary_prompt = f"กรุณาสรุปเนื้อหาการสนทนาต่อไปนี้ให้กระชับและเข้าใจง่าย:\n{chat_history_text}"
+
+        # Calling LLM to summarize the chat
+        response = chat_model.invoke(summary_prompt)
+        
+        # Create a list of RemoveMessage objects to prune the state.
+        delete_messages = [RemoveMessage(id=m.id) for m in to_summarize if m.id is not None]
+
+        # Log the summarization result
+        print(f"[Summary Result] Generated summary:\n>> {response.content}")
+        print(f"[Status] Old messages deleted. Remaining messages: {len(messages) - len(to_summarize)}")
+        
+        # Log the exact 3 messages that are being kept
+        print("\n[Retained Messages] Here are the 3 latest messages kept in memory:")
+        for i, m in enumerate(kept_messages, 1):
+            role = "User" if m.type == "human" else "Assistant"
+            print(f"  {i}. {role}: {m.content}")
+            
+        print("="*50 + "\n")
+
+        return {
+            "summary": response.content,
+            "messages": delete_messages
+        }
+    
+    # Log when no summarization is needed
+    print("[Action] Message count is 3 or less. Skipping summarization.")
+    
+    # Log the messages currently kept in memory (which is 3 or less)
+    print("\n[Retained Messages] Here are the messages currently kept in memory:")
+    for i, m in enumerate(messages, 1):
+        role = "User" if m.type == "human" else "Assistant"
+        print(f"  {i}. {role}: {m.content}")
+        
+    print("="*50 + "\n")
+    
+    return {"summary": summary}
+
 # ----- Conditional -----
 def should_continue(state: AgentState):
     """
@@ -139,7 +226,7 @@ def core_identity() -> str:
         "ใช้คำลงท้ายว่า 'ครับ'\n"
     )
  
-def lab_prompt(context: str) -> str:
+def lab_prompt(context: str, summary_context: str) -> str:
     return (
         core_identity()
         + "\nบทบาทของคุณ:\n"
@@ -152,6 +239,7 @@ def lab_prompt(context: str) -> str:
         "- ไขมันในเลือดสูง\n"
         "- โรคไตเรื้อรัง (CKD)\n"
         "- ภาวะที่เกี่ยวข้องกับการทำงานของตับ\n\n"
+        f"{summary_context}\n"
         f"### ข้อมูลอ้างอิงจากคู่มือสุขภาพ:\n{context}\n\n"
         "หลักการตอบ:\n"
         "1. ถ้าผู้ใช้ถามทั่วไป ให้ตอบจากความรู้เบื้องต้น โดยอ้างอิงคู่มือด้านบนถ้าเกี่ยวข้อง\n"
@@ -183,14 +271,19 @@ def call_model(state: AgentState):
     Node สำหรับตอบคำถาม: ดึง Context มาใส่ใน Prompt จริงๆ
     """
     messages = state["messages"]
+    summary = state.get("summary", "")
     last_user_message = messages[-1].content 
     
     # 1. ดึงข้อมูลจาก Vector DB (Markdown)
     context = retrieve_context(last_user_message)
+    
+    # Adding smurrized chat to the System Message
+    summary_context = f"\n\nสรุปบริบทการสนทนาก่อนหน้านี้: {summary}" if summary else ""
+    
     print("=== CONTEXT ===", context)
     
     # 2. เลือก prompt ตามว่ามี context หรือไม่
-    system_prompt = lab_prompt(context) if context else no_context_prompt()
+    system_prompt = lab_prompt(context, summary_context) if context else no_context_prompt()
 
     # 3. ส่งคำสั่งที่มี "ข้อมูลอ้างอิง (Context)" ไปให้ Gemini
     response = chat_model.invoke([SystemMessage(content=system_prompt)] + messages)
@@ -205,6 +298,7 @@ def build_graph():
     graph.add_node("input", input_node)
     graph.add_node("classify_intent", classify_intent_node)
     graph.add_node("our_agent", call_model)
+    graph.add_node("summarize", summarize_conversation)
 
     tool_node = ToolNode(tools=tools)
     graph.add_node("tools", tool_node)
@@ -231,10 +325,11 @@ def build_graph():
         should_continue,
         {
             "continue": "tools",
-            "end": END
+            "end": "summarize"  # Summarizing before END
         }
     )
 
+    graph.add_edge("summarize", END)
     graph.add_edge("tools", "our_agent")
 
     app = graph.compile()
