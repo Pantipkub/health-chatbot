@@ -1,3 +1,4 @@
+import uuid
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -90,7 +91,7 @@ async def chat_completions(req: ChatRequest):
 
     # 4. Return the response to Open WebUI
     return {
-        "id": "chatcmpl-health",
+        "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
         "choices": [
             {
