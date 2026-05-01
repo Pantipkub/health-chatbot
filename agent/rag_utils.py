@@ -19,7 +19,7 @@ vector_db = Chroma(
     embedding_function=embedding_function
 )
 
-def retrieve_context(query: str, k: int = 3) -> str:
+def retrieve_context(query: str, k: int = 6) -> str:
     """
     รับคำถาม -> ค้นหา Vector DB -> คืนค่าเป็น Text (Context)
     """
