@@ -89,7 +89,7 @@ def input_node(state: AgentState):
         last_msg.id = str(uuid.uuid4())
         
 
-    print(f"User said (ID: {last_msg.id}): {last_msg.content}")
+    print(f"\n[1] >>> INPUT NODE: User said (ID: {last_msg.id}): {last_msg.content}")
 
     return state
 
@@ -114,6 +114,8 @@ def classify_intent_node(state: AgentState):
     result = intent_model.invoke([prompt, user_msg])
 
     state["intent"] = result.content.strip().lower()
+    
+    print(f"[2] >>> INTENT DETECTED: {state['intent']}")
     return state
 
 def route_by_intent(state):
@@ -199,9 +201,49 @@ def summarize_conversation(state: AgentState):
         role = "User" if m.type == "human" else "Assistant"
         print(f"  {i}. {role}: {m.content}")
         
-    print("="*50 + "\n")
+    print(f"[5] >>> SUMMARIZE NODE: Cleaning memory...")
     
     return {"summary": summary}
+
+def guardrail_node(state: AgentState):
+    """
+    Checking the output before sending it to the user.
+    """
+    state["current_node"] = "guardrail"
+    state["steps"].append("guardrail")
+    
+    last_ai_message = state["messages"][-1].content
+    
+    print(f"[4] 🛡️ GUARDRAIL: Checking safety rules...")
+    
+    # 1. Rule
+    guard_prompt = (
+        "คุณคือหัวหน้าพยาบาลผู้ตรวจทานข้อความ (Safety Editor)\n"
+        "หน้าที่: ตรวจสอบคำตอบของ AI ที่จะส่งให้บุคลากร และแก้ไขให้ถูกต้องตามกฎ\n\n"
+        "--- กฎการแก้ไข ---\n"
+        "1. ห้ามยืนยันว่าเป็นโรคเด็ดขาด ให้เปลี่ยนเป็น 'มีความเสี่ยง' หรือ 'แนวโน้ม'\n"
+        "2. ห้ามระบุชื่อยาหรือวิธีใช้ยา\n"
+        "3. ปรับโทนเสียงให้สุภาพ ไม่ทำให้ผู้ฟังตกใจ (ห้ามใช้คำว่า อันตราย, วิกฤต, ร้ายแรง)\n"
+        "4. หากคำตอบเดิมดีอยู่แล้วและทำตามกฎครบถ้วน ให้ตอบเพียง 'PASSED'\n"
+        "5. หากไม่ผ่านกฎ ให้แก้ไขข้อความใหม่ทั้งหมดให้ถูกต้องและคงเนื้อหาเดิมไว้\n\n"
+        f"ข้อความที่ต้องตรวจ: {last_ai_message}"
+    )
+
+    # 2. Call Model for checking
+    check_result = chat_model.invoke(guard_prompt).content.strip()
+
+    if "PASSED" in check_result.upper() and len(check_result) < 15:
+        print("    ✅ RESULT: PASSED (Safe to output)")
+        state["steps"].append("guardrail_passed")
+        return state
+    else:
+        print("    ⚠️ RESULT: FAILED (Response modified by Guardrail)")
+        print(f"    ORIGINAL: {last_ai_message[:50]}...")
+        print(f"    MODIFIED: {check_result[:50]}...")
+        
+        state["messages"][-1].content = check_result
+        state["steps"].append("guardrail_modified")
+        return state
 
 # ----- Conditional -----
 def should_continue(state: AgentState):
@@ -286,6 +328,7 @@ def call_model(state: AgentState):
     system_prompt = lab_prompt(context, summary_context) if context else no_context_prompt()
 
     # 3. ส่งคำสั่งที่มี "ข้อมูลอ้างอิง (Context)" ไปให้ Gemini
+    print(f"[3] >>> AGENT NODE: Generating response...")
     response = chat_model.invoke([SystemMessage(content=system_prompt)] + messages)
     
     return {"messages": [response], "steps": ["retrieval", "generate"]}
@@ -298,6 +341,7 @@ def build_graph():
     graph.add_node("input", input_node)
     graph.add_node("classify_intent", classify_intent_node)
     graph.add_node("our_agent", call_model)
+    graph.add_node("guardrail", guardrail_node)
     graph.add_node("summarize", summarize_conversation)
 
     tool_node = ToolNode(tools=tools)
@@ -325,10 +369,11 @@ def build_graph():
         should_continue,
         {
             "continue": "tools",
-            "end": "summarize"  # Summarizing before END
+            "end": "guardrail"  # GuardRail before Summarize and END
         }
     )
 
+    graph.add_edge("guardrail", "summarize")
     graph.add_edge("summarize", END)
     graph.add_edge("tools", "our_agent")
 
