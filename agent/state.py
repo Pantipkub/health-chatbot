@@ -9,6 +9,7 @@ class AgentState(TypedDict):
     summary: str
     steps: list[str]                    # log ว่า agent ทำอะไรไปบ้าง
     current_node: Optional[str]         # ตอนนี้อยู่ node ไหน
+    blocked: bool
 
     # medical-specific
     intent: Optional[str]               # symptom, general_health
