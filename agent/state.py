@@ -11,6 +11,7 @@ class AgentState(TypedDict, total=False):
     summary: str
     steps: list[str]
     current_node: Optional[str]
+    blocked: bool
 
     # Intent classification.
     intent: Optional[str]

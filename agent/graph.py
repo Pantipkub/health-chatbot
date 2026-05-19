@@ -101,37 +101,6 @@ def input_node(state: AgentState):
 
     return state
 
-def classify_intent_node(state: AgentState):
-    """
-    Analyze user message and classify medical intent using LLM.
-    """
-
-    state["current_node"] = "classify_intent"
-    state["steps"].append("Classifying user intent with LLM")
-
-    prompt = SystemMessage(content=
-        "You are a medical triage assistant.\n"
-        "Classify the user's intent into ONE of the following:\n"
-        "- symptom\n"
-        "- general_health\n"
-        "- administrative\n\n"
-        "Respond with only the label."
-    )
-
-    user_msg = state["messages"][-1]
-    result = intent_model.invoke([prompt, user_msg])
-
-    state["intent"] = result.content.strip().lower()
-    
-    print(f"[2] >>> INTENT DETECTED: {state['intent']}")
-    return state
-
-def route_by_intent(state):
-    intent = state.get("intent")
-    if intent in ("symptom", "general_health"):
-        return intent
-    return "general_health"  # fallback
-
 def summarize_conversation(state: AgentState):
     """
     Summarizing both user and AI conversation, and keeping only 3 latest chat messages
@@ -144,11 +113,11 @@ def summarize_conversation(state: AgentState):
     print(f"[Memory Check] Current number of messages in state: {len(messages)}")
     print("="*50)
 
-    # If there are more than 3 messages (including from both user and AI)
-    if len(messages) > 3:
-        # Extracting: keeping only 3 last messages, the others will be summarized
-        to_summarize = messages[:-3]
-        kept_messages = messages[-3:] # Extract the 3 messages we are keeping
+    # 3 Turns = 6 ข้อความ (User + AI) จะเริ่มสรุปเมื่อสะสมครบ 12 ข้อความขึ้นไป
+    if len(messages) > 12:
+        # Extracting: keeping only 6 last messages, the others will be summarized
+        to_summarize = messages[:-6]
+        kept_messages = messages[-6:] # Extract the 6 messages we are keeping
         
         # Log the action being taken
         print(f"[Action] Exceeded 3 messages. Summarizing {len(to_summarize)} old messages...")
@@ -209,49 +178,144 @@ def summarize_conversation(state: AgentState):
         role = "User" if m.type == "human" else "Assistant"
         print(f"  {i}. {role}: {m.content}")
         
-    print(f"[5] >>> SUMMARIZE NODE: Cleaning memory...")
+    print(f"[4] >>> SUMMARIZE NODE: Cleaning memory...")
     
     return {"summary": summary}
 
-def guardrail_node(state: AgentState):
+def guardrail_input_node(state: AgentState):
     """
-    Checking the output before sending it to the user.
+    ตรวจสอบ input ของ user ก่อนเข้าระบบหลัก
+    - ALLOW: คำถามสุขภาพ, แปรผลแลป, การทักทาย, บริบทอื่นๆที่เกี่ยวข้อง
+    - BLOCK: ไม่เกี่ยวกับสุขภาพเลย เช่น เกม, การเมือง, ความบันเทิง
     """
-    state["current_node"] = "guardrail"
-    state["steps"].append("guardrail")
-    
-    last_ai_message = state["messages"][-1].content
-    
-    print(f"[4] 🛡️ GUARDRAIL: Checking safety rules...")
-    
-    # 1. Rule
+    state["current_node"] = "guardrail_input"
+    state["steps"].append("guardrail_input")
+
+    last_user_message = state["messages"][-1].content
+
+    print(f"[1.5] 🛡️ INPUT GUARDRAIL: Checking relevance...")
+
     guard_prompt = (
-        "คุณคือหัวหน้าพยาบาลผู้ตรวจทานข้อความ (Safety Editor)\n"
-        "หน้าที่: ตรวจสอบคำตอบของ AI ที่จะส่งให้บุคลากร และแก้ไขให้ถูกต้องตามกฎ\n\n"
-        "--- กฎการแก้ไข ---\n"
-        "1. ห้ามยืนยันว่าเป็นโรคเด็ดขาด ให้เปลี่ยนเป็น 'มีความเสี่ยง' หรือ 'แนวโน้ม'\n"
-        "2. ห้ามระบุชื่อยาหรือวิธีใช้ยา\n"
-        "3. ปรับโทนเสียงให้สุภาพ ไม่ทำให้ผู้ฟังตกใจ (ห้ามใช้คำว่า อันตราย, วิกฤต, ร้ายแรง)\n"
-        "4. หากคำตอบเดิมดีอยู่แล้วและทำตามกฎครบถ้วน ให้ตอบเพียง 'PASSED'\n"
-        "5. หากไม่ผ่านกฎ ให้แก้ไขข้อความใหม่ทั้งหมดให้ถูกต้องและคงเนื้อหาเดิมไว้\n\n"
-        f"ข้อความที่ต้องตรวจ: {last_ai_message}"
+        "คุณคือระบบกรองคำถามของแอปพลิเคชันสุขภาพ\n"
+        "หน้าที่: ตัดสินว่าข้อความของผู้ใช้ควรได้รับการประมวลผลต่อหรือไม่\n\n"
+        "--- เกณฑ์การตัดสิน ---\n"
+        "ALLOW (อนุญาต):\n"
+        "- คำถามเกี่ยวกับอาการ โรค สุขภาพทั่วไป\n"
+        "- การส่งค่าผลตรวจแลป หรือขอแปลผล\n"
+        "- การทักทายทั่วไป เช่น สวัสดี, ขอบคุณ, ลาก่อน\n"
+        "- คำถามเกี่ยวกับการใช้งานระบบนี้\n"
+        "- ข้อความที่กำกวม ไม่แน่ใจ หรืออาจเกี่ยวกับสุขภาพได้\n\n"
+        "BLOCK (ปฏิเสธ) เฉพาะเมื่อชัดเจนว่าไม่เกี่ยวกับสุขภาพเลย:\n"
+        "- เกม, ภาพยนตร์, ดนตรี, ความบันเทิง\n"
+        "- การเมือง, ข่าวสาร, กีฬา\n"
+        "- การเขียนโค้ด, เทคโนโลยี\n"
+        "- การทำอาหาร, ท่องเที่ยว, ช้อปปิ้ง\n\n"
+        "ตอบเป็น JSON เท่านั้น ห้ามมีข้อความอื่น:\n"
+        '{"action": "ALLOW" หรือ "BLOCK", "reason": "เหตุผลสั้นๆ 1 ประโยค"}\n\n'
+        f"ข้อความของผู้ใช้: {last_user_message}"
     )
 
-    # 2. Call Model for checking
-    check_result = chat_model.invoke(guard_prompt).content.strip()
+    result = intent_model.invoke(guard_prompt).content.strip()
 
-    if "PASSED" in check_result.upper() and len(check_result) < 15:
-        print("    ✅ RESULT: PASSED (Safe to output)")
-        state["steps"].append("guardrail_passed")
-        return state
-    else:
-        print("    ⚠️ RESULT: FAILED (Response modified by Guardrail)")
-        print(f"    ORIGINAL: {last_ai_message[:50]}...")
-        print(f"    MODIFIED: {check_result[:50]}...")
+    # Parse JSON จาก LLM
+    try:
+        # ลบ markdown code block ถ้ามี
+        clean = result.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(clean)
+        action = parsed.get("action", "ALLOW").upper()
+        reason = parsed.get("reason", "")
+    except (json.JSONDecodeError, AttributeError):
+        # ถ้า parse ไม่ได้ให้ ALLOW ไว้ก่อน (fail-open) เพื่อไม่บล็อกผิด
+        action = "ALLOW"
+        reason = "parse error - defaulting to allow"
+
+    if action == "BLOCK":
+        print(f"    🚫 BLOCKED: {reason}")
+        state["steps"].append("guardrail_input_blocked")
+
+        # inject ข้อความปฏิเสธกลับเข้า messages โดยตรง
+        # แล้ว route ไปยัง END เลย (ดูที่ graph routing ด้านล่าง)
+        from langchain_core.messages import AIMessage
+        rejection_msg = AIMessage(
+            content=(
+                "ขออภัยครับ ผมช่วยได้เฉพาะเรื่องสุขภาพและการแปลผลตรวจสุขภาพเท่านั้น\n"
+                "หากมีคำถามเกี่ยวกับอาการ ผลแลป หรือโรคที่เกี่ยวข้อง ยินดีช่วยเสมอครับ"
+            )
+        )
+        return {
+            "messages": [rejection_msg],
+            "blocked": True,
+            "current_node": "guardrail_input",
+            "steps": state["steps"] + ["guardrail_input_blocked"]
+        }
+
+    print(f"    ✅ ALLOWED: {reason}")
+    return {
+        "blocked": False,
+        "current_node": "guardrail_input",
+        "steps": state.get("steps", []) + ["guardrail_input_allowed"]
+    }
+
+
+def route_after_input_guardrail(state: AgentState):
+    """Route หลัง input guardrail: ถ้าถูก block ให้จบเลย"""
+    if state.get("blocked", False):
+        return "blocked"
+    return "continue"
+
+def guardrail_output_node(state: AgentState):
+    """
+    ตรวจสอบ output ก่อนส่งให้ user
+    """
+    state["current_node"] = "guardrail_output"
+    state["steps"].append("guardrail_output")
+
+    last_ai_message = state["messages"][-1].content
+
+    print(f"[3] 🛡️ OUTPUT GUARDRAIL: Checking safety rules...")
+
+    guard_prompt = (
+        "คุณคือหัวหน้าพยาบาลผู้ตรวจทานข้อความ (Safety Editor)\n"
+        "ตรวจสอบคำตอบของ AI ตามกฎด้านล่าง แล้วตอบเป็น JSON เท่านั้น\n\n"
+        "--- กฎการตรวจสอบ ---\n"
+        "1. ห้ามยืนยันว่าเป็นโรคเด็ดขาด ให้ใช้คำว่า 'มีความเสี่ยง' หรือ 'แนวโน้ม'\n"
+        "2. ห้ามระบุชื่อยาหรือวิธีใช้ยา\n"
+        "3. ห้ามใช้คำที่ทำให้ตกใจ: อันตราย, วิกฤต, ร้ายแรง\n\n"
+        "รูปแบบคำตอบ JSON (ห้ามมีข้อความอื่น):\n"
+        "ถ้าผ่านทุกกฎ: "
+        '{"action": "PASSED", "revised_content": null}\n'
+        "ถ้าไม่ผ่าน: "
+        '{"action": "MODIFIED", "revised_content": "ข้อความที่แก้ไขแล้วทั้งหมด"}\n\n'
+        f"ข้อความที่ต้องตรวจ:\n{last_ai_message}"
+    )
+
+    result = chat_model.invoke(guard_prompt).content.strip()
+
+    try:
+        clean = result.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(clean)
+        action = parsed.get("action", "PASSED").upper()
+        revised = parsed.get("revised_content")
+    except (json.JSONDecodeError, AttributeError):
+        # fail-safe: ถ้า parse ไม่ได้ ให้ผ่านไปเลย ไม่แก้ไข
+        action = "PASSED"
+        revised = None
+
+    if action == "MODIFIED" and revised:
+        print(f"    ⚠️ MODIFIED: Response was adjusted by guardrail")
+        from langchain_core.messages import AIMessage
+        new_message = AIMessage(content=revised, id=state["messages"][-1].id)
         
-        state["messages"][-1].content = check_result
-        state["steps"].append("guardrail_modified")
-        return state
+        # ส่งกลับไปให้ LangGraph ทำการ Overwrite ข้อความเดิมตาม ID เอง
+        return {
+            "messages": [new_message],
+            "steps": state.get("steps", []) + ["guardrail_modified"]
+        }
+    else:
+        print("    ✅ PASSED: Response is safe")
+        return {
+            "steps": state.get("steps", []) + ["guardrail_passed"]
+        }
 
 # ----- Conditional -----
 def should_continue(state: AgentState):
@@ -371,10 +435,13 @@ def call_model(state: AgentState):
     system_prompt = lab_prompt(context, summary_context) if context else no_context_prompt()
 
     # 3. ส่งคำสั่งที่มี "ข้อมูลอ้างอิง (Context)" ไปให้ Gemini
-    print(f"[3] >>> AGENT NODE: Generating response...")
+    print(f"[2] >>> AGENT NODE: Generating response...")
     response = chat_model.invoke([SystemMessage(content=system_prompt)] + messages)
     
-    return {"messages": [response], "steps": ["retrieval", "generate"]}
+    return {
+        "messages": [response], 
+        "steps": state.get("steps", []) + ["retrieval", "generate"]
+    }
 
 # ----- Generate graph -----
 def build_graph():
@@ -382,36 +449,31 @@ def build_graph():
 
     # ----- add nodes -----
     graph.add_node("input", input_node)
-    graph.add_node("classify_intent", classify_intent_node)
+    graph.add_node("guardrail_input", guardrail_input_node)
     graph.add_node("extract_info_node", extract_info_node)
     graph.add_node("ask_lab_node", ask_lab_node)
     graph.add_node("ask_fasting_node", ask_fasting_node)
     graph.add_node("ask_age_node", ask_age_node)
     graph.add_node("ask_gender_node", ask_gender_node)
     graph.add_node("our_agent", call_model)
-    graph.add_node("guardrail", guardrail_node)
+    graph.add_node("guardrail_output", guardrail_output_node)
     graph.add_node("summarize", summarize_conversation)
 
     tool_node = ToolNode(tools=tools)
     graph.add_node("tools", tool_node)
 
-    # ----- entry point -----
     graph.set_entry_point("input")
+    graph.add_edge("input", "guardrail_input")
 
-    # ----- normal edges -----
-    graph.add_edge("input", "classify_intent")
-
-    # ----- routing by intent -----
     graph.add_conditional_edges(
-        "classify_intent",
-        route_by_intent,
+        "guardrail_input",
+        route_after_input_guardrail,
         {
-            "symptom": "extract_info_node",
-            "general_health": "extract_info_node"
+            "blocked": END,
+            "continue": "extract_info_node"
         }
     )
 
-    # ----- tool loop (optional ตอนนี้ tools = []) -----
     graph.add_conditional_edges(
         "extract_info_node",
         route_after_extraction,
@@ -436,11 +498,11 @@ def build_graph():
         should_continue,
         {
             "continue": "tools",
-            "end": "guardrail"  # GuardRail before Summarize and END
+            "end": "guardrail_output"
         }
     )
 
-    graph.add_edge("guardrail", "summarize")
+    graph.add_edge("guardrail_output", "summarize")
     graph.add_edge("summarize", END)
     graph.add_edge("tools", "our_agent")
 
