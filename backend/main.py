@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 import json
 import re
 import time
@@ -9,7 +10,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
-from agent.graph import build_graph, chat_model
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 # ลบ chat_memory_store ออกไปเลย! เราจะใช้ความจำจาก Open WebUI แทน
@@ -25,11 +25,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-graph = build_graph()
 HEALTH_MODEL = "health-agent"
 EVAL_SIMULATOR_MODEL = "health-eval-simulator"
 USER_SIMULATION_CASES_PATH = Path(__file__).resolve().parents[1] / "eval" / "user_simulation_cases.json"
 JUDGE_CRITERIA_PATH = Path(__file__).resolve().parents[1] / "eval" / "judge_criteria.json"
+graph = None
+chat_model = None
+
+
+def _load_agent_resources():
+    global graph, chat_model
+    if graph is None or chat_model is None:
+        from agent.graph import build_graph, chat_model as loaded_chat_model
+
+        chat_model = loaded_chat_model
+        if graph is None:
+            graph = build_graph()
+    return graph, chat_model
 
 # ---------- OpenAI-compatible schema ----------
 class Message(BaseModel):
@@ -201,6 +213,7 @@ def _extract_case_id(user_text: str, cases: list[dict[str, Any]]) -> str | None:
 
 
 def _invoke_health_chatbot(chatbot_messages: list[HumanMessage | AIMessage]) -> tuple[str, int]:
+    graph, _ = _load_agent_resources()
     start = time.perf_counter()
     result = graph.invoke({
         "messages": chatbot_messages,
@@ -213,6 +226,7 @@ def _invoke_health_chatbot(chatbot_messages: list[HumanMessage | AIMessage]) -> 
 
 
 def _next_patient_message(case: dict[str, Any], transcript: list[dict[str, str]], remaining_turns: int) -> str:
+    _, chat_model = _load_agent_resources()
     public_case = {
         "id": case.get("id"),
         "risk_level": case.get("risk_level"),
@@ -263,6 +277,7 @@ def _parse_judge_json(raw_output: str) -> dict[str, Any]:
 
 
 def _judge_transcript(case: dict[str, Any], transcript: list[dict[str, str]], latencies: list[int]) -> dict[str, Any]:
+    _, chat_model = _load_agent_resources()
     transcript_text = "\n".join(
         f"{idx + 1}. {turn['role']}: {turn['content']}" for idx, turn in enumerate(transcript)
     )
@@ -563,6 +578,20 @@ def _simulator_page() -> str:
       word-break: break-word;
       box-shadow: 0 10px 30px rgba(0,0,0,.18);
     }
+    .message-body {
+      white-space: pre-wrap;
+    }
+    .bot-bullets {
+      margin: 0;
+      padding-left: 1.2rem;
+      white-space: normal;
+    }
+    .bot-bullets li {
+      margin: 0 0 10px;
+    }
+    .bot-bullets li:last-child {
+      margin-bottom: 0;
+    }
     .patient .bubble {
       background: var(--patient);
       border-bottom-right-radius: 5px;
@@ -592,6 +621,30 @@ def _simulator_page() -> str:
       color: var(--muted);
       font-size: 13px;
       margin: 12px 0;
+    }
+    .typing-body {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: rgba(255,255,255,.78);
+    }
+    .typing-dots {
+      display: inline-flex;
+      gap: 4px;
+      align-items: center;
+    }
+    .typing-dots span {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(255,255,255,.7);
+      animation: typingPulse 1s ease-in-out infinite;
+    }
+    .typing-dots span:nth-child(2) { animation-delay: .16s; }
+    .typing-dots span:nth-child(3) { animation-delay: .32s; }
+    @keyframes typingPulse {
+      0%, 80%, 100% { opacity: .35; transform: translateY(0); }
+      40% { opacity: 1; transform: translateY(-3px); }
     }
     .score-grid {
       display: grid;
@@ -629,16 +682,122 @@ def _simulator_page() -> str:
     const runBtn = document.querySelector("#runBtn");
     const chat = document.querySelector("#chat");
     let source = null;
+    let typingRow = null;
+    let lastStatusText = "";
+    let lastStatusNode = null;
 
     function addStatus(text) {
+      const normalized = text.trim();
+      if (lastStatusNode && lastStatusText === normalized) {
+        lastStatusNode.scrollIntoView({ behavior: "smooth", block: "end" });
+        return;
+      }
       const div = document.createElement("div");
       div.className = "status";
-      div.textContent = text;
+      div.textContent = normalized;
       chat.appendChild(div);
+      lastStatusText = normalized;
+      lastStatusNode = div;
       div.scrollIntoView({ behavior: "smooth", block: "end" });
     }
 
+    function resetStatusDedupe() {
+      lastStatusText = "";
+      lastStatusNode = null;
+    }
+
+    function botBulletItems(content) {
+      const items = [];
+      const politeClosers = new Set([
+        "\u0e04\u0e23\u0e31\u0e1a",
+        "\u0e04\u0e48\u0e30",
+        "\u0e04\u0e30",
+        "\u0e19\u0e30\u0e04\u0e23\u0e31\u0e1a",
+        "\u0e19\u0e30\u0e04\u0e30",
+        "\u0e19\u0e30\u0e04\u0e48\u0e30",
+      ]);
+
+      content
+        .split(/\\n+/)
+        .map(item => item.trim())
+        .filter(Boolean)
+        .map(item => item.replace(/^[-*•]\\s+/, "").replace(/^\\d+[.)]\\s+/, "").trim())
+        .forEach(item => {
+          if (politeClosers.has(item) && items.length) {
+            items[items.length - 1] = `${items[items.length - 1]} ${item}`;
+          } else {
+            items.push(item);
+          }
+        });
+
+      return items;
+    }
+
+    function appendMessageBody(bubble, role, content) {
+      const body = document.createElement("div");
+      body.className = "message-body";
+
+      const bulletItems = role === "bot" ? botBulletItems(content) : [];
+      if (bulletItems.length > 1) {
+        const list = document.createElement("ul");
+        list.className = "bot-bullets";
+        bulletItems.forEach(item => {
+          const li = document.createElement("li");
+          li.textContent = item;
+          list.appendChild(li);
+        });
+        body.appendChild(list);
+      } else {
+        body.textContent = content;
+      }
+
+      bubble.appendChild(body);
+    }
+
+    function removeTyping() {
+      if (typingRow) {
+        typingRow.remove();
+        typingRow = null;
+      }
+    }
+
+    function addTyping() {
+      resetStatusDedupe();
+      if (typingRow) {
+        typingRow.scrollIntoView({ behavior: "smooth", block: "end" });
+        return;
+      }
+      removeTyping();
+      const row = document.createElement("div");
+      row.className = "row bot typing";
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+
+      const label = document.createElement("div");
+      label.className = "label";
+      label.textContent = "Health Chatbot";
+
+      const body = document.createElement("div");
+      body.className = "typing-body";
+      const text = document.createElement("span");
+      text.textContent = "กำลังพิมพ์";
+      const dots = document.createElement("span");
+      dots.className = "typing-dots";
+      dots.innerHTML = "<span></span><span></span><span></span>";
+
+      body.appendChild(text);
+      body.appendChild(dots);
+      bubble.appendChild(label);
+      bubble.appendChild(body);
+      row.appendChild(bubble);
+      chat.appendChild(row);
+      typingRow = row;
+      row.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+
     function addBubble(role, content, meta) {
+      removeTyping();
+      resetStatusDedupe();
       const row = document.createElement("div");
       row.className = `row ${role}`;
       const bubble = document.createElement("div");
@@ -646,10 +805,8 @@ def _simulator_page() -> str:
       const label = document.createElement("div");
       label.className = "label";
       label.textContent = role === "patient" ? "Patient Simulator" : role === "bot" ? "Health Chatbot" : "LLM Judge";
-      const body = document.createElement("div");
-      body.textContent = content;
       bubble.appendChild(label);
-      bubble.appendChild(body);
+      appendMessageBody(bubble, role, content);
       if (meta) {
         const metaNode = document.createElement("div");
         metaNode.className = "meta";
@@ -721,20 +878,29 @@ def _simulator_page() -> str:
         addBubble("bot", data.content, `Latency: ${data.latency_ms} ms`);
       });
       source.addEventListener("status", event => {
-        addStatus(JSON.parse(event.data).content);
+        const status = JSON.parse(event.data).content;
+        if (/health chatbot is responding/i.test(status)) {
+          addTyping();
+        } else {
+          addStatus(status);
+        }
       });
       source.addEventListener("judge", event => {
+        removeTyping();
         addJudge(JSON.parse(event.data));
       });
       source.addEventListener("error_event", event => {
+        removeTyping();
         addStatus(`Error: ${JSON.parse(event.data).content}`);
       });
       source.addEventListener("done", () => {
+        removeTyping();
         addStatus("Done");
         source.close();
         runBtn.disabled = false;
       });
       source.onerror = () => {
+        removeTyping();
         addStatus("Connection closed");
         runBtn.disabled = false;
         if (source) source.close();
@@ -753,7 +919,28 @@ def _eval_event(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def _eval_simulation_event_stream(case_id: str):
+async def _blocking_step_events(
+    func,
+    args: tuple[Any, ...],
+    status_content: str,
+    timeout_seconds: int | None = None
+):
+    task = asyncio.create_task(asyncio.to_thread(func, *args))
+    start = time.perf_counter()
+
+    while True:
+        try:
+            result = await asyncio.wait_for(asyncio.shield(task), timeout=3)
+            yield "result", result
+            return
+        except asyncio.TimeoutError:
+            if timeout_seconds is not None and time.perf_counter() - start >= timeout_seconds:
+                task.cancel()
+                raise TimeoutError(f"{status_content} timed out after {timeout_seconds} seconds")
+            yield "event", _eval_event("status", {"content": status_content})
+
+
+async def _eval_simulation_event_stream(case_id: str):
     try:
         cases = _load_simulation_cases()
         case = next((item for item in cases if item["id"] == case_id), None)
@@ -776,7 +963,17 @@ def _eval_simulation_event_stream(case_id: str):
             yield _eval_event("patient", {"content": patient_message})
 
             yield _eval_event("status", {"content": "Health Chatbot is responding..."})
-            chatbot_answer, latency_ms = _invoke_health_chatbot(chatbot_messages)
+            chatbot_answer = ""
+            latency_ms = 0
+            async for kind, payload in _blocking_step_events(
+                _invoke_health_chatbot,
+                (list(chatbot_messages),),
+                "Health Chatbot is responding...",
+            ):
+                if kind == "event":
+                    yield payload
+                else:
+                    chatbot_answer, latency_ms = payload
             latencies.append(latency_ms)
             transcript.append({"role": "chatbot", "content": chatbot_answer})
             chatbot_messages.append(AIMessage(content=chatbot_answer))
@@ -787,12 +984,29 @@ def _eval_simulation_event_stream(case_id: str):
                 break
 
             yield _eval_event("status", {"content": "Patient Simulator is thinking..."})
-            patient_message = _next_patient_message(case, transcript, remaining_turns)
+            async for kind, payload in _blocking_step_events(
+                _next_patient_message,
+                (case, list(transcript), remaining_turns),
+                "Patient Simulator is thinking...",
+            ):
+                if kind == "event":
+                    yield payload
+                else:
+                    patient_message = payload
             if patient_message.upper().startswith("DONE"):
                 break
 
         yield _eval_event("status", {"content": "LLM Judge is scoring the full transcript..."})
-        judge = _judge_transcript(case, transcript, latencies)
+        judge: dict[str, Any] = {}
+        async for kind, payload in _blocking_step_events(
+            _judge_transcript,
+            (case, list(transcript), list(latencies)),
+            "LLM Judge is scoring the full transcript...",
+        ):
+            if kind == "event":
+                yield payload
+            else:
+                judge = payload
         judge["latencies_ms"] = latencies
         judge["total_latency_ms"] = sum(latencies)
         yield _eval_event("judge", judge)
@@ -846,6 +1060,7 @@ async def chat_completions(req: ChatRequest):
     if is_webui_task:
         print("\n[Interceptor] Open WebUI automated task detected. Bypassing LangGraph.")
         # Call the model directly without saving to memory
+        _, chat_model = _load_agent_resources()
         response = chat_model.invoke(langchain_messages)
         assistant_content = response.content
         
@@ -858,6 +1073,7 @@ async def chat_completions(req: ChatRequest):
     else:
         print("\n[Interceptor] Normal user message detected. Routing to LangGraph.")
         # 2. Pass the entire history into LangGraph
+        graph, _ = _load_agent_resources()
         result = graph.invoke({
             "messages": langchain_messages,
             "steps": [],
@@ -881,7 +1097,14 @@ async def chat_completions(req: ChatRequest):
 
 @app.get("/eval/simulator")
 async def eval_simulator_page():
-    return HTMLResponse(_simulator_page())
+    return HTMLResponse(
+        _simulator_page(),
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/eval/simulator/cases")
