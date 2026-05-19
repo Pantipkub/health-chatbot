@@ -20,6 +20,7 @@ from .slot_filling_graph import (
     ask_lab_node,
     extract_info_node,
     route_after_extraction,
+    _updates_from_pending_slot,
 )
 import uuid
 
@@ -194,6 +195,18 @@ def guardrail_input_node(state: AgentState):
     last_user_message = state["messages"][-1].content
 
     print(f"[1.5] 🛡️ INPUT GUARDRAIL: Checking relevance...")
+
+    pending_slot_updates = _updates_from_pending_slot(state, last_user_message)
+    if pending_slot_updates:
+        print(
+            "    ✅ ALLOWED: user is answering the pending slot "
+            f"{state.get('pending_slot')!r}"
+        )
+        return {
+            "blocked": False,
+            "current_node": "guardrail_input",
+            "steps": state.get("steps", []) + ["guardrail_input_pending_slot_allowed"],
+        }
 
     guard_prompt = (
         "คุณคือระบบกรองคำถามของแอปพลิเคชันสุขภาพ\n"
