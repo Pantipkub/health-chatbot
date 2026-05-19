@@ -13,6 +13,14 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from .state import AgentState
 from .rag_utils import retrieve_context
+from .slot_filling_graph import (
+    ask_age_node,
+    ask_fasting_node,
+    ask_gender_node,
+    ask_lab_node,
+    extract_info_node,
+    route_after_extraction,
+)
 import uuid
 
 load_dotenv()
@@ -308,6 +316,37 @@ def no_context_prompt() -> str:
         "หากมีผลแลปในหัวข้อเหล่านี้ ยินดีช่วยแปลผลให้ครับ\n"
     )
     
+def _analysis_slot_context(state: AgentState) -> str:
+    labs = state.get("extracted_lab_values") or {}
+    lab_text = ", ".join(f"{name}: {value}" for name, value in labs.items()) or "-"
+    return (
+        "\n\nข้อมูล structured ที่สกัดได้ก่อนวิเคราะห์:"
+        f"\n- age: {state.get('age')}"
+        f"\n- gender: {state.get('gender')}"
+        f"\n- fasting_status: {state.get('fasting_status')}"
+        f"\n- underlying_disease: {state.get('underlying_disease')}"
+        f"\n- current_medications: {state.get('current_medications')}"
+        f"\n- current_symptoms: {state.get('current_symptoms')}"
+        f"\n- extracted_lab_values: {lab_text}"
+    )
+
+
+def _analysis_retrieval_query(state: AgentState, fallback_query: str) -> str:
+    labs = state.get("extracted_lab_values") or {}
+    if not labs:
+        return fallback_query
+
+    query_parts = [
+        "health checkup lab interpretation",
+        "diabetes dyslipidemia kidney liver blood pressure",
+        f"age {state.get('age')}",
+        f"gender {state.get('gender')}",
+        f"fasting {state.get('fasting_status')}",
+    ]
+    query_parts.extend(f"{name} {value}" for name, value in labs.items())
+    return " ".join(str(part) for part in query_parts if part)
+
+
 def call_model(state: AgentState):
     """
     Node สำหรับตอบคำถาม: ดึง Context มาใส่ใน Prompt จริงๆ
@@ -317,11 +356,15 @@ def call_model(state: AgentState):
     last_user_message = messages[-1].content 
     
     # 1. ดึงข้อมูลจาก Vector DB (Markdown)
-    context = retrieve_context(last_user_message)
+    retrieval_query = _analysis_retrieval_query(state, last_user_message)
+    context = retrieve_context(retrieval_query)
     
     # Adding smurrized chat to the System Message
     summary_context = f"\n\nสรุปบริบทการสนทนาก่อนหน้านี้: {summary}" if summary else ""
     
+    summary_context += _analysis_slot_context(state)
+    
+    print("=== RETRIEVAL QUERY ===", retrieval_query)
     print("=== CONTEXT ===", context)
     
     # 2. เลือก prompt ตามว่ามี context หรือไม่
@@ -340,6 +383,11 @@ def build_graph():
     # ----- add nodes -----
     graph.add_node("input", input_node)
     graph.add_node("classify_intent", classify_intent_node)
+    graph.add_node("extract_info_node", extract_info_node)
+    graph.add_node("ask_lab_node", ask_lab_node)
+    graph.add_node("ask_fasting_node", ask_fasting_node)
+    graph.add_node("ask_age_node", ask_age_node)
+    graph.add_node("ask_gender_node", ask_gender_node)
     graph.add_node("our_agent", call_model)
     graph.add_node("guardrail", guardrail_node)
     graph.add_node("summarize", summarize_conversation)
@@ -358,12 +406,31 @@ def build_graph():
         "classify_intent",
         route_by_intent,
         {
-            "symptom": "our_agent",
-            "general_health": "our_agent"
+            "symptom": "extract_info_node",
+            "general_health": "extract_info_node"
         }
     )
 
     # ----- tool loop (optional ตอนนี้ tools = []) -----
+    graph.add_conditional_edges(
+        "extract_info_node",
+        route_after_extraction,
+        {
+            "ask_lab_node": "ask_lab_node",
+            "ask_fasting_node": "ask_fasting_node",
+            "ask_age_node": "ask_age_node",
+            "ask_gender_node": "ask_gender_node",
+            "our_agent": "our_agent",
+        },
+    )
+
+    # Question nodes finish the current turn. The next user reply re-enters
+    # this graph at "input" with the accumulated chat history/state.
+    graph.add_edge("ask_lab_node", END)
+    graph.add_edge("ask_fasting_node", END)
+    graph.add_edge("ask_age_node", END)
+    graph.add_edge("ask_gender_node", END)
+
     graph.add_conditional_edges(
         "our_agent",
         should_continue,
