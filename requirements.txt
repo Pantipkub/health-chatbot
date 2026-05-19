@@ -7,3 +7,6 @@ langchain-huggingface
 langchain-chroma
 sentence-transformers
 python-dotenv
+langchain-google-vertexai
+google-cloud-aiplatform
+google-auth

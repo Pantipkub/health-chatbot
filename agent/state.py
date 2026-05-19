@@ -3,11 +3,13 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 class AgentState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], add_messages]
+    messages: Annotated[list[BaseMessage], add_messages]
 
     # debug
+    summary: str
     steps: list[str]                    # log ว่า agent ทำอะไรไปบ้าง
     current_node: Optional[str]         # ตอนนี้อยู่ node ไหน
+    blocked: bool
 
     # medical-specific
     intent: Optional[str]               # symptom, general_health
